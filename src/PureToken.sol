@@ -167,7 +167,7 @@ contract PureToken is ERC20, Owned {
     }
 
     function isExcludedFromCirculatingSupply(address _address) public view returns(bool, uint8) {
-        for (uint8 i = 0; i < excludedFromCirculatingSupply.length; i++){
+        for (uint8 i; i < excludedFromCirculatingSupply.length; ++i){
             if (_address == excludedFromCirculatingSupply[i]) {
                 return (true, i);
             }
@@ -207,8 +207,11 @@ contract PureToken is ERC20, Owned {
 
     function getCirculatingMinusReserve() external view returns(uint256 circulating) {
         circulating = totalSupply() - (balanceOf(DEAD_ADDRESS) + balanceOf(address(0)));
-        for (uint8 i = 0; i < excludedFromCirculatingSupply.length; i++) {
+        for (uint8 i; i < excludedFromCirculatingSupply.length;) {
             circulating = circulating - balanceOf(excludedFromCirculatingSupply[i]);
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -252,19 +255,19 @@ contract PureToken is ERC20, Owned {
 
                 swapTokensForWeth(contractTokenBalance);
                 
-                uint256 contractBnbBalance = address(this).balance;
+                uint256 contractBalance = address(this).balance;
                 uint8   feesTaken = 0;
                 
                 if (true) {
-                    uint256 marketingPortion = contractBnbBalance.mul(marketingFee).div(totalFees);
-                    contractBnbBalance = contractBnbBalance - marketingPortion;
+                    uint256 marketingPortion = contractBalance.mul(marketingFee).div(totalFees);
+                    contractBalance = contractBalance - marketingPortion;
                     feesTaken = feesTaken + marketingFee;
 
                     transferToWallet(payable(marketingWallet), marketingPortion);
 
                     // if(block.timestamp < _firstBlock + (60 days)) { // dev fee only lasts for 60 days post launch.
-                    //     uint256 devPortion = contractBnbBalance.mul(2).div(totalFees - feesTaken);
-                    //     contractBnbBalance = contractBnbBalance - devPortion;
+                    //     uint256 devPortion = contractBalance.mul(2).div(totalFees - feesTaken);
+                    //     contractBalance = contractBalance - devPortion;
                     //     feesTaken = feesTaken + 2;
                     
                     //     royaltiesSent[2] += devPortion;
@@ -273,8 +276,8 @@ contract PureToken is ERC20, Owned {
                 }
 
                 if (true) {
-                    uint256 teamPortion = contractBnbBalance.mul(teamFee).div(totalFees - feesTaken);
-                    contractBnbBalance = contractBnbBalance - teamPortion;
+                    uint256 teamPortion = contractBalance.mul(teamFee).div(totalFees - feesTaken);
+                    contractBalance = contractBalance - teamPortion;
                     feesTaken = feesTaken + teamFee;
 
                     transferToWallet(payable(teamWallet), teamPortion);
