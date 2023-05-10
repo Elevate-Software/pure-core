@@ -10,6 +10,13 @@ import { IUniswapV2Pair, IUniswapV2Router02, IUniswapV2Factory } from "./interfa
 
 contract PureToken is ERC20, Owned {
 
+
+    // ---------------
+    // State Variables
+    // ---------------
+
+    // TODO: Slot pack?
+
     IUniswapV2Router02 public uniswapV2Router;
     address public uniswapV2Pair;
 
@@ -17,7 +24,7 @@ contract PureToken is ERC20, Owned {
 
     address[] public excludedFromCirculatingSupply;
 
-    bool private swapping;
+    bool private inSwap;
     bool public tradingIsEnabled;
     
     uint256 public swapTokensAtAmount;
@@ -39,36 +46,13 @@ contract PureToken is ERC20, Owned {
     mapping(address => bool) public isBlacklisted;
 
     // store addresses that a automatic market maker pairs. Any transfer *to* these addresses
-    // could be subject to a maximum transfer amount
     mapping(address => bool) public automatedMarketMakerPairs;
 
-    
-    event RoyaltiesUpdated(uint8 operationsFee, uint8 marketingFee, uint8 devFee);
 
-    event BuyTaxUpdated(uint8, uint8);
+    // -----------
+    // Constructor
+    // -----------
 
-    event SellTaxUpdated(uint8, uint8);
-
-    event TransferTaxUpdated(uint8, uint8);
-   
-    event ExcludeFromFees(address indexed account, bool isExcluded);
-
-    event SetAutomatedMarketMakerPair(address indexed pair, bool indexed value);
-
-    event MarketingWalletUpdated(address indexed newMarketingWallet, address indexed oldMarketingWallet);
-    
-    event operationsWalletUpdated(address indexed newoperationsWallet, address indexed oldoperationsWallet);
-
-    event RoyaltiesTransferred(address indexed wallet, uint256 amountEth);
-
-    event Erc20TokenWithdrawn(address token, uint256 amount);
-
-    event AddressExcludedFromCirculatingSupply(address account, bool excluded);
-
-    event Migrated(address indexed account, uint256 amount);
-    
-    event TradingEnabled();
-    
     constructor(
         address _marketingWallet,
         address _operationsWallet,
@@ -98,7 +82,55 @@ contract PureToken is ERC20, Owned {
         _mint(owner, 100_000_000 * (10**18));
     }
 
+
+    // ---------
+    // Modifiers
+    // ---------
+
+    modifier lockSwap {
+        inSwap = true;
+        _;
+        inSwap = false;
+    }
+
+
+    // ------
+    // Events
+    // ------
+    
+    event RoyaltiesUpdated(uint8 operationsFee, uint8 marketingFee, uint8 devFee);
+
+    event BuyTaxUpdated(uint8, uint8);
+
+    event SellTaxUpdated(uint8, uint8);
+
+    event TransferTaxUpdated(uint8, uint8);
+   
+    event ExcludeFromFees(address indexed account, bool isExcluded);
+
+    event SetAutomatedMarketMakerPair(address indexed pair, bool indexed value);
+
+    event MarketingWalletUpdated(address indexed newMarketingWallet, address indexed oldMarketingWallet);
+    
+    event operationsWalletUpdated(address indexed newoperationsWallet, address indexed oldoperationsWallet);
+
+    event RoyaltiesTransferred(address indexed wallet, uint256 amountEth);
+
+    event Erc20TokenWithdrawn(address token, uint256 amount);
+
+    event AddressExcludedFromCirculatingSupply(address account, bool excluded);
+    
+    event TradingEnabled();
+
+
+    // ---------
+    // Functions
+    // ---------
+
     receive() external payable {}
+
+
+    // ~ onlyOwner ~
 
     function addPartnerOrExchange(address _partnerOrExchangeAddress) external onlyOwner {
         isExcludedFromFees[_partnerOrExchangeAddress] = true;
@@ -189,6 +221,10 @@ contract PureToken is ERC20, Owned {
         emit ExcludeFromFees(account, excluded);
     }
 
+    function modifyBlacklist(address account, bool blacklisted) external onlyOwner {
+        isBlacklisted[account] = blacklisted;
+    }
+
     function isExcludedFromCirculatingSupply(address _address) public view returns(bool, uint8) {
         for (uint8 i; i < excludedFromCirculatingSupply.length;){
             if (_address == excludedFromCirculatingSupply[i]) {
@@ -222,24 +258,21 @@ contract PureToken is ERC20, Owned {
         _setAutomatedMarketMakerPair(pair, value);
     }
 
-    function _setAutomatedMarketMakerPair(address pair, bool value) internal {
-        require(automatedMarketMakerPairs[pair] != value, "PureToken.sol::_setAutomatedMarketMakerPair() Automated market maker pair is already set to that value");
+    /// @notice Withdraw a PureToken from the treasury.
+    /// @dev    Only callable by owner.
+    /// @param  _token The token to withdraw from the treasury.
+    function safeWithdraw(address _token) external onlyOwner {
+        uint256 amount = IERC20(_token).balanceOf(address(this));
+        require(amount > 0, "PureToken.sol::safeWithdraw() Insufficient token balance");
+        require(_token != address(this), "PureToken.sol::safeWithdraw() cannot remove $Pure from this contract");
 
-        automatedMarketMakerPairs[pair] = value;
-        excludeFromCirculatingSupply(pair, value);
+        assert(IERC20(_token).transfer(msg.sender, amount));
 
-        emit SetAutomatedMarketMakerPair(pair, value);
+        emit Erc20TokenWithdrawn(_token, amount);
     }
 
-    function getCirculatingMinusReserve() external view returns(uint256 circulating) {
-        circulating = totalSupply() - (balanceOf(DEAD_ADDRESS) + balanceOf(address(0)));
-        for (uint8 i; i < excludedFromCirculatingSupply.length;) {
-            circulating = circulating - balanceOf(excludedFromCirculatingSupply[i]);
-            unchecked {
-                ++i;
-            }
-        }
-    }
+    
+    // ~ internal ~
 
     // TODO: TEST this!!
     function _transfer(
@@ -271,14 +304,8 @@ contract PureToken is ERC20, Owned {
                 uint256 contractTokenBalance = balanceOf(address(this));
                 bool canSwap = contractTokenBalance >= swapTokensAtAmount;
                 
-                if (!swapping && canSwap) {
-                    swapping = true;
-
-                    // TODO: Maybe swap for stablecoin??
-                    _swapTokensForWeth(contractTokenBalance);
-                    _distributeTaxes();
-        
-                    swapping = false;
+                if (!inSwap && canSwap) {
+                    _handleRoyalties(contractTokenBalance);
                 }
 
             }
@@ -296,11 +323,13 @@ contract PureToken is ERC20, Owned {
         super._transfer(from, to, amount);
     }
 
-    function modifyBlacklist(address account, bool blacklisted) external onlyOwner {
-        isBlacklisted[account] = blacklisted;
+    function _handleRoyalties(uint256 _contractTokenBalance) internal lockSwap {
+        _swapTokensForWeth(_contractTokenBalance);
+        _distributeTaxes();
     }
 
     function _swapTokensForWeth(uint256 tokenAmount) internal {
+        // TODO: Maybe swap for stablecoin??
         // generate the uniswap pair path of token -> weth
         address[] memory path = new address[](2);
         path[0] = address(this);
@@ -340,17 +369,26 @@ contract PureToken is ERC20, Owned {
         emit RoyaltiesTransferred(recipient, amount);
     }
 
-    /// @notice Withdraw a PureToken from the treasury.
-    /// @dev    Only callable by owner.
-    /// @param  _token The token to withdraw from the treasury.
-    function safeWithdraw(address _token) external onlyOwner {
-        uint256 amount = IERC20(_token).balanceOf(address(this));
-        require(amount > 0, "PureToken.sol::safeWithdraw() Insufficient token balance");
-        require(_token != address(this), "PureToken.sol::safeWithdraw() cannot remove $Pure from this contract");
+    function _setAutomatedMarketMakerPair(address pair, bool value) internal {
+        require(automatedMarketMakerPairs[pair] != value, "PureToken.sol::_setAutomatedMarketMakerPair() Automated market maker pair is already set to that value");
 
-        assert(IERC20(_token).transfer(msg.sender, amount));
+        automatedMarketMakerPairs[pair] = value;
+        excludeFromCirculatingSupply(pair, value);
 
-        emit Erc20TokenWithdrawn(_token, amount);
+        emit SetAutomatedMarketMakerPair(pair, value);
+    }
+
+
+    // ~ View ~
+
+    function getCirculatingMinusReserve() external view returns(uint256 circulating) {
+        circulating = totalSupply() - (balanceOf(DEAD_ADDRESS) + balanceOf(address(0)));
+        for (uint8 i; i < excludedFromCirculatingSupply.length;) {
+            circulating = circulating - balanceOf(excludedFromCirculatingSupply[i]);
+            unchecked {
+                ++i;
+            }
+        }
     }
 
 }
