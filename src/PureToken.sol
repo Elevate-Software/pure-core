@@ -22,9 +22,9 @@ contract PureToken is ERC20, Owned {
     
     uint256 public swapTokensAtAmount;
 
-    uint8 public operationsFee;
-    uint8 public marketingFee;
-    uint8 public devFee;
+    uint256 public operationsFee;
+    uint256 public marketingFee;
+    uint256 public devFee;
 
     address public operationsWallet;
     address public marketingWallet;
@@ -32,6 +32,8 @@ contract PureToken is ERC20, Owned {
 
     uint8 public buyTax;
     uint8 public sellTax;
+    uint8 public txTax;
+    uint256 public maxWallet; // TODO: Add to transfer and add updateMaxWallet func
 
     mapping(address => bool) public isExcludedFromFees;
     mapping(address => bool) public isBlacklisted;
@@ -46,6 +48,8 @@ contract PureToken is ERC20, Owned {
     event BuyTaxUpdated(uint8, uint8);
 
     event SellTaxUpdated(uint8, uint8);
+
+    event TransferTaxUpdated(uint8, uint8);
    
     event ExcludeFromFees(address indexed account, bool isExcluded);
 
@@ -100,8 +104,8 @@ contract PureToken is ERC20, Owned {
         isExcludedFromFees[_partnerOrExchangeAddress] = true;
     }
     
-    function updateoperationsWallet(address _newWallet) external onlyOwner {
-        require(_newWallet != operationsWallet, "PureToken.sol::updateoperationsWallet() address is already set");
+    function updateOperationsWallet(address _newWallet) external onlyOwner {
+        require(_newWallet != operationsWallet, "PureToken.sol::updateOperationsWallet() address is already set");
 
         isExcludedFromFees[_newWallet] = true;
         operationsWallet = _newWallet;
@@ -128,8 +132,12 @@ contract PureToken is ERC20, Owned {
         operationsFee = 40;
         marketingFee = 40;
         devFee = 20;
-        buyTax = 16;
-        sellTax = 16;
+
+        buyTax = 5;
+        sellTax = 5;
+        txTax = 5;
+
+        maxWallet = totalSupply() * 2 / 100; // TODO: Check
         swapTokensAtAmount = 20_000 * (10**18); // TODO: Config
         tradingIsEnabled = true;
 
@@ -146,7 +154,7 @@ contract PureToken is ERC20, Owned {
         emit RoyaltiesUpdated(_operationsFee, _marketingFee, _devFee);
     }
 
-    function updateBuytax(uint8 _buyTax) external onlyOwner {
+    function updateBuyTax(uint8 _buyTax) external onlyOwner {
         require(_buyTax <= 20, "PuteToken.sol::updateBuyTax() buy tax must not be greater than 20%");
 
         emit BuyTaxUpdated(buyTax, _buyTax);
@@ -154,12 +162,20 @@ contract PureToken is ERC20, Owned {
         buyTax = _buyTax;
     }
 
-    function updateSelltax(uint8 _sellTax) external onlyOwner {
+    function updateSellTax(uint8 _sellTax) external onlyOwner {
         require(_sellTax <= 20, "PuteToken.sol::updateSellTax() sell tax must not be greater than 20%");
 
         emit SellTaxUpdated(sellTax, _sellTax);
 
         sellTax = _sellTax;
+    }
+
+    function updateTransferTax(uint8 _txTax) external onlyOwner {
+        require(_txTax <= 20, "PuteToken.sol::updateTransferTax() transfer tax must not be greater than 20%");
+
+        emit TransferTaxUpdated(txTax, _txTax);
+
+        txTax = _txTax;
     }
     
     function updateUniswapV2Router(address newAddress) external onlyOwner {
@@ -179,7 +195,7 @@ contract PureToken is ERC20, Owned {
                 return (true, i);
             }
             unchecked {
-                ++i
+                ++i;
             }
         }
         return (false, 0);
@@ -225,6 +241,7 @@ contract PureToken is ERC20, Owned {
         }
     }
 
+    // TODO: TEST this!!
     function _transfer(
         address from,
         address to,
@@ -234,83 +251,48 @@ contract PureToken is ERC20, Owned {
         require(from != address(0), "ERC20: transfer from the zero address");
         require(to != address(0), "ERC20: transfer to the zero address");
         require(tradingIsEnabled || (isExcludedFromFees[from] || isExcludedFromFees[to]), "PureToken.sol::_transfer() trading is not enabled or wallet is not whitelisted");
-        
-        bool excludedAccount = isExcludedFromFees[from] || isExcludedFromFees[to];
-        
-        if ( // NON whitelisted buy
-            tradingIsEnabled &&
-            automatedMarketMakerPairs[from] &&
-            !excludedAccount
-        ) {
-            // if receiver or sender is blacklisted, revert
+        require(balanceOf(from) >= amount, "PureToken::_transfer(), insufficient balance");
+
+        if (!isExcludedFromFees[from] && !isExcludedFromFees[to]) {
             require(!isBlacklisted[from], "PureToken.sol::_transfer() sender is blacklisted");
             require(!isBlacklisted[to],   "PureToken.sol::_transfer() receiver is blacklisted");
-        }
-        
-        else if ( // NON whitelisted sell
-            tradingIsEnabled &&
-            automatedMarketMakerPairs[to] &&
-            !excludedAccount
-        ) {
-            // if receiver or sender is blacklisted, revert
-            require(!isBlacklisted[from], "PureToken.sol::_transfer() sender is blacklisted");
-            require(!isBlacklisted[to],   "PureToken.sol::_transfer() receiver is blacklisted");
-            
-            // take contract balance of royalty tokens
-            uint256 contractTokenBalance = balanceOf(address(this));
-            bool canSwap = contractTokenBalance >= swapTokensAtAmount;
-            
-            if (!swapping && canSwap) {
-                swapping = true;
+            // TODO: Check MaxWallet
 
-                swapTokensForWeth(contractTokenBalance);
-                
-                uint256 contractBalance = address(this).balance;
-                uint8   feesTaken = 0;
-                
-                if (true) {
-                    uint256 marketingPortion = contractBalance.mul(marketingFee).div(totalFees);
-                    contractBalance = contractBalance - marketingPortion;
-                    feesTaken = feesTaken + marketingFee;
+            uint256 takeTax;
 
-                    transferToWallet(payable(marketingWallet), marketingPortion);
-
-                    // if(block.timestamp < _firstBlock + (60 days)) { // dev fee only lasts for 60 days post launch.
-                    //     uint256 devPortion = contractBalance.mul(2).div(totalFees - feesTaken);
-                    //     contractBalance = contractBalance - devPortion;
-                    //     feesTaken = feesTaken + 2;
-                    
-                    //     royaltiesSent[2] += devPortion;
-                    //     transferToWallet(payable(devWallet), devPortion);
-                    // }
-                }
-
-                if (true) {
-                    uint256 teamPortion = contractBalance.mul(devFee).div(totalFees - feesTaken);
-                    contractBalance = contractBalance - teamPortion;
-                    feesTaken = feesTaken + devFee;
-
-                    transferToWallet(payable(operationsWallet), teamPortion);
-                }
-    
-                swapping = false;
+            // non-whitelisted buy
+            if (automatedMarketMakerPairs[from]) {
+                takeTax = buyTax;
             }
+            // non-whitelisted sell
+            else if (automatedMarketMakerPairs[to]) {
+                takeTax = sellTax;
+
+                uint256 contractTokenBalance = balanceOf(address(this));
+                bool canSwap = contractTokenBalance >= swapTokensAtAmount;
+                
+                if (!swapping && canSwap) {
+                    swapping = true;
+
+                    // TODO: Maybe swap for stablecoin??
+                    _swapTokensForWeth(contractTokenBalance);
+                    _distributeTaxes();
+        
+                    swapping = false;
+                }
+
+            }
+            // non-whitelisted transfer
+            else {
+                takeTax = txTax;
+            }
+
+            uint256 taxAmount = (amount * takeTax) / 100;
+            amount = amount - taxAmount;
+                
+            super._transfer(from, address(this), taxAmount);
         }
-
-        bool takeFee = tradingIsEnabled && !swapping && !excludedAccount;
-
-        if(takeFee) {
-            require(!isBlacklisted[from], "PureToken.sol::_transfer() sender is blacklisted");
-            require(!isBlacklisted[to],   "PureToken.sol::_transfer() receiver is blacklisted");
-
-            uint256 fees;
-
-            fees = amount.mul(totalFees).div(100);
-            amount = amount.sub(fees);
-
-            super._transfer(from, address(this), fees);
-        }
-
+        
         super._transfer(from, to, amount);
     }
 
@@ -318,7 +300,7 @@ contract PureToken is ERC20, Owned {
         isBlacklisted[account] = blacklisted;
     }
 
-    function swapTokensForWeth(uint256 tokenAmount) internal {
+    function _swapTokensForWeth(uint256 tokenAmount) internal {
         // generate the uniswap pair path of token -> weth
         address[] memory path = new address[](2);
         path[0] = address(this);
@@ -336,9 +318,25 @@ contract PureToken is ERC20, Owned {
         );
         
     }
+
+    function _distributeTaxes() internal {
+        uint256 contractBalance = address(this).balance;
+
+        // transfer portion for operations
+        uint256 marketingPortion = (contractBalance * marketingFee) / 100;
+        _transferToWallet(payable(marketingWallet), marketingPortion);
+        
+        // transfer portion for marketing
+        uint256 operationsPortion = (contractBalance * operationsFee) / 100;
+        _transferToWallet(payable(operationsWallet), operationsPortion);
+
+        // transfer portion for dev
+        uint256 devPortion = (contractBalance * devFee) / 100;
+        _transferToWallet(payable(devWallet), devPortion);
+    }
     
-    function transferToWallet(address payable recipient, uint256 amount) internal {
-        recipient.transfer(amount);
+    function _transferToWallet(address payable recipient, uint256 amount) internal {
+        recipient.transfer(amount); // TODO: update to use .call instead of .transfer
         emit RoyaltiesTransferred(recipient, amount);
     }
 
