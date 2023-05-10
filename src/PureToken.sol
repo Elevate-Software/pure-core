@@ -129,6 +129,126 @@ contract PureToken is ERC20, Owned {
 
     receive() external payable {}
 
+    
+    // ~ internal ~
+
+    // TODO: TEST this!!
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+
+    ) internal override {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+        require(tradingIsEnabled || (isExcludedFromFees[from] || isExcludedFromFees[to]), "PureToken.sol::_transfer() trading is not enabled or wallet is not whitelisted");
+        require(balanceOf(from) >= amount, "PureToken::_transfer(), insufficient balance");
+
+        if (!isExcludedFromFees[from] && !isExcludedFromFees[to]) {
+            require(!isBlacklisted[from], "PureToken.sol::_transfer() sender is blacklisted");
+            require(!isBlacklisted[to],   "PureToken.sol::_transfer() receiver is blacklisted");
+            // TODO: Check MaxWallet
+
+            uint256 takeTax;
+
+            // non-whitelisted buy
+            if (automatedMarketMakerPairs[from]) {
+                takeTax = buyTax;
+            }
+            // non-whitelisted sell
+            else if (automatedMarketMakerPairs[to]) {
+                takeTax = sellTax;
+
+                uint256 contractTokenBalance = balanceOf(address(this));
+                bool canSwap = contractTokenBalance >= swapTokensAtAmount;
+                
+                if (!inSwap && canSwap) {
+                    _handleRoyalties(contractTokenBalance);
+                }
+
+            }
+            // non-whitelisted transfer
+            else {
+                takeTax = txTax;
+            }
+
+            uint256 taxAmount = (amount * takeTax) / 100;
+            amount = amount - taxAmount;
+                
+            super._transfer(from, address(this), taxAmount);
+        }
+        
+        super._transfer(from, to, amount);
+    }
+
+    function _handleRoyalties(uint256 _contractTokenBalance) internal lockSwap {
+        _swapTokensForWeth(_contractTokenBalance);
+        _distributeTaxes();
+    }
+
+    function _swapTokensForWeth(uint256 tokenAmount) internal {
+        // TODO: Maybe swap for stablecoin??
+        // generate the uniswap pair path of token -> weth
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = uniswapV2Router.WETH();
+
+        _approve(address(this), address(uniswapV2Router), tokenAmount);
+
+        // make the swap
+        uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            tokenAmount,
+            0, // accept any amount of ETH
+            path,
+            address(this),
+            block.timestamp
+        );
+        
+    }
+
+    function _distributeTaxes() internal {
+        uint256 contractBalance = address(this).balance;
+
+        // transfer portion for operations
+        uint256 marketingPortion = (contractBalance * marketingFee) / 100;
+        _transferToWallet(payable(marketingWallet), marketingPortion);
+        
+        // transfer portion for marketing
+        uint256 operationsPortion = (contractBalance * operationsFee) / 100;
+        _transferToWallet(payable(operationsWallet), operationsPortion);
+
+        // transfer portion for dev
+        uint256 devPortion = (contractBalance * devFee) / 100;
+        _transferToWallet(payable(devWallet), devPortion);
+    }
+    
+    function _transferToWallet(address payable recipient, uint256 amount) internal {
+        recipient.transfer(amount); // TODO: update to use .call instead of .transfer
+        emit RoyaltiesTransferred(recipient, amount);
+    }
+
+    function _setAutomatedMarketMakerPair(address pair, bool value) internal {
+        require(automatedMarketMakerPairs[pair] != value, "PureToken.sol::_setAutomatedMarketMakerPair() Automated market maker pair is already set to that value");
+
+        automatedMarketMakerPairs[pair] = value;
+        excludeFromCirculatingSupply(pair, value);
+
+        emit SetAutomatedMarketMakerPair(pair, value);
+    }
+
+
+    // ~ View ~
+
+    function getCirculatingMinusReserve() external view returns(uint256 circulating) {
+        circulating = totalSupply() - (balanceOf(DEAD_ADDRESS) + balanceOf(address(0)));
+        for (uint8 i; i < excludedFromCirculatingSupply.length;) {
+            circulating = circulating - balanceOf(excludedFromCirculatingSupply[i]);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
 
     // ~ onlyOwner ~
 
@@ -258,6 +378,11 @@ contract PureToken is ERC20, Owned {
         _setAutomatedMarketMakerPair(pair, value);
     }
 
+    function transferOwnership(address newOwner) public override onlyOwner {
+        isExcludedFromFees[newOwner] = true;
+        _transferOwnership(newOwner);
+    }
+
     /// @notice Withdraw a PureToken from the treasury.
     /// @dev    Only callable by owner.
     /// @param  _token The token to withdraw from the treasury.
@@ -269,126 +394,6 @@ contract PureToken is ERC20, Owned {
         assert(IERC20(_token).transfer(msg.sender, amount));
 
         emit Erc20TokenWithdrawn(_token, amount);
-    }
-
-    
-    // ~ internal ~
-
-    // TODO: TEST this!!
-    function _transfer(
-        address from,
-        address to,
-        uint256 amount
-
-    ) internal override {
-        require(from != address(0), "ERC20: transfer from the zero address");
-        require(to != address(0), "ERC20: transfer to the zero address");
-        require(tradingIsEnabled || (isExcludedFromFees[from] || isExcludedFromFees[to]), "PureToken.sol::_transfer() trading is not enabled or wallet is not whitelisted");
-        require(balanceOf(from) >= amount, "PureToken::_transfer(), insufficient balance");
-
-        if (!isExcludedFromFees[from] && !isExcludedFromFees[to]) {
-            require(!isBlacklisted[from], "PureToken.sol::_transfer() sender is blacklisted");
-            require(!isBlacklisted[to],   "PureToken.sol::_transfer() receiver is blacklisted");
-            // TODO: Check MaxWallet
-
-            uint256 takeTax;
-
-            // non-whitelisted buy
-            if (automatedMarketMakerPairs[from]) {
-                takeTax = buyTax;
-            }
-            // non-whitelisted sell
-            else if (automatedMarketMakerPairs[to]) {
-                takeTax = sellTax;
-
-                uint256 contractTokenBalance = balanceOf(address(this));
-                bool canSwap = contractTokenBalance >= swapTokensAtAmount;
-                
-                if (!inSwap && canSwap) {
-                    _handleRoyalties(contractTokenBalance);
-                }
-
-            }
-            // non-whitelisted transfer
-            else {
-                takeTax = txTax;
-            }
-
-            uint256 taxAmount = (amount * takeTax) / 100;
-            amount = amount - taxAmount;
-                
-            super._transfer(from, address(this), taxAmount);
-        }
-        
-        super._transfer(from, to, amount);
-    }
-
-    function _handleRoyalties(uint256 _contractTokenBalance) internal lockSwap {
-        _swapTokensForWeth(_contractTokenBalance);
-        _distributeTaxes();
-    }
-
-    function _swapTokensForWeth(uint256 tokenAmount) internal {
-        // TODO: Maybe swap for stablecoin??
-        // generate the uniswap pair path of token -> weth
-        address[] memory path = new address[](2);
-        path[0] = address(this);
-        path[1] = uniswapV2Router.WETH();
-
-        _approve(address(this), address(uniswapV2Router), tokenAmount);
-
-        // make the swap
-        uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
-            tokenAmount,
-            0, // accept any amount of ETH
-            path,
-            address(this),
-            block.timestamp
-        );
-        
-    }
-
-    function _distributeTaxes() internal {
-        uint256 contractBalance = address(this).balance;
-
-        // transfer portion for operations
-        uint256 marketingPortion = (contractBalance * marketingFee) / 100;
-        _transferToWallet(payable(marketingWallet), marketingPortion);
-        
-        // transfer portion for marketing
-        uint256 operationsPortion = (contractBalance * operationsFee) / 100;
-        _transferToWallet(payable(operationsWallet), operationsPortion);
-
-        // transfer portion for dev
-        uint256 devPortion = (contractBalance * devFee) / 100;
-        _transferToWallet(payable(devWallet), devPortion);
-    }
-    
-    function _transferToWallet(address payable recipient, uint256 amount) internal {
-        recipient.transfer(amount); // TODO: update to use .call instead of .transfer
-        emit RoyaltiesTransferred(recipient, amount);
-    }
-
-    function _setAutomatedMarketMakerPair(address pair, bool value) internal {
-        require(automatedMarketMakerPairs[pair] != value, "PureToken.sol::_setAutomatedMarketMakerPair() Automated market maker pair is already set to that value");
-
-        automatedMarketMakerPairs[pair] = value;
-        excludeFromCirculatingSupply(pair, value);
-
-        emit SetAutomatedMarketMakerPair(pair, value);
-    }
-
-
-    // ~ View ~
-
-    function getCirculatingMinusReserve() external view returns(uint256 circulating) {
-        circulating = totalSupply() - (balanceOf(DEAD_ADDRESS) + balanceOf(address(0)));
-        for (uint8 i; i < excludedFromCirculatingSupply.length;) {
-            circulating = circulating - balanceOf(excludedFromCirculatingSupply[i]);
-            unchecked {
-                ++i;
-            }
-        }
     }
 
 }
