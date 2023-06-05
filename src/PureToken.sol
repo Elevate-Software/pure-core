@@ -9,7 +9,7 @@ import { IUniswapV2Pair, IUniswapV2Router02, IUniswapV2Factory } from "./interfa
 // TODO: Config NATSPEC
 
 contract PureToken is ERC20, Owned {
-
+ 
 
     // ---------------
     // State Variables
@@ -297,7 +297,7 @@ contract PureToken is ERC20, Owned {
     }
     
     function updateRoyalties(uint8 _operationsFee, uint8 _marketingFee, uint8 _devFee) external onlyOwner {
-        require(_operationsFee + _marketingFee + _devFee == 40, "PureToken.sol::updateFees() sum of fees must be 100");
+        require(_operationsFee + _marketingFee + _devFee == 100, "PureToken.sol::updateRoyalties() sum of fees must be 100");
         
         operationsFee = _operationsFee;
         marketingFee = _marketingFee;
